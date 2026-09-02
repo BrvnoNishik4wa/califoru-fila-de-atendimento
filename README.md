@@ -29,7 +29,7 @@ Antes de fechar o desenho do sistema, apresentei o protótipo para o time das lo
 
 ## Como foi construído
 
-Mesma base do [sistema de ajustes](../califoru-sistema-ajustes): **Google Apps Script** como backend, **Google Sheets** como banco de dados. A arquitetura segue o mesmo padrão de segurança:
+Mesma base do [[sistema de ajustes](../califoru-sistema-ajustes):](https://github.com/BrvnoNishik4wa/califoru-sistema-ajustes) **Google Apps Script** como backend, **Google Sheets** como banco de dados. A arquitetura segue o mesmo padrão de segurança:
 
 - Toda função pública resolve permissão e loja **no servidor**, nunca confiando no que vem do cliente — a mesma lição aplicada de novo, agora em outro sistema.
 - **Controle de concorrência** com `LockService` em toda escrita na fila, para evitar que duas ações simultâneas corrompam o estado.
