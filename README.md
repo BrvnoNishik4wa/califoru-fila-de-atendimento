@@ -1,4 +1,4 @@
-# CaliforU — Sistema de Lista da Vez
+# CaliforU — Sistema de Fila de Atendimento
 
 ![Google Apps Script](https://img.shields.io/badge/Google_Apps_Script-4285F4?style=flat-square&logo=googleappsscript&logoColor=white)
 ![JavaScript](https://img.shields.io/badge/JavaScript-F7DF1E?style=flat-square&logo=javascript&logoColor=black)
