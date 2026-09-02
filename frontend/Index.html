@@ -1,0 +1,355 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="theme-color" content="#0E0E0E">
+  <title>Lista da Vez — CaliforU</title>
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <?!= include('Styles'); ?>
+</head>
+<body>
+
+<div id="toast"></div>
+
+<!-- ════════════════════════════════════════════════════════
+     BOOT
+     ════════════════════════════════════════════════════════ -->
+<div id="view-boot" class="view active">
+  <div style="flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:24px;background:#111;position:relative;height:100dvh">
+    <div style="position:absolute;top:16px;left:16px;font-family:'JetBrains Mono',monospace;font-size:14px;color:rgba(255,255,255,.12)">+</div>
+    <div style="position:absolute;bottom:16px;right:16px;font-family:'JetBrains Mono',monospace;font-size:14px;color:rgba(255,255,255,.12)">+</div>
+    <div style="display:flex;align-items:center;gap:14px">
+      <div style="width:52px;height:52px;background:#E86A33;color:#111;display:flex;align-items:center;justify-content:center;font-family:'Archivo Black',sans-serif;font-size:28px">C</div>
+      <span style="font-family:'Archivo Black',sans-serif;font-size:26px;text-transform:uppercase;letter-spacing:.02em">Lista da Vez</span>
+    </div>
+    <div style="width:220px;height:6px;background:#000;border:1px solid rgba(255,255,255,.12);overflow:hidden">
+      <div style="width:32%;height:100%;background:#E86A33;animation:bootBar 1.3s linear infinite"></div>
+    </div>
+    <span style="font-family:'JetBrains Mono',monospace;font-size:11px;color:rgba(255,255,255,.35);letter-spacing:.16em;text-transform:uppercase">Verificando acesso…</span>
+  </div>
+</div>
+
+<!-- ════════════════════════════════════════════════════════
+     ACESSO NEGADO
+     ════════════════════════════════════════════════════════ -->
+<div id="view-denied" class="view">
+  <div style="flex:1;display:flex;align-items:center;justify-content:center;padding:24px;background:#111;height:100dvh">
+    <div style="width:100%;max-width:400px;background:#1A1A1A;border:1px solid rgba(255,255,255,.12);border-left:4px solid #FF4D4D;padding:28px;display:flex;flex-direction:column;gap:14px;animation:rise .2s ease-out">
+      <div style="display:flex;align-items:center;gap:10px">
+        <span style="width:22px;height:22px;border:2px solid #FF4D4D;color:#FF4D4D;display:flex;align-items:center;justify-content:center;font-family:'Archivo Black',sans-serif;font-size:12px">×</span>
+        <span style="font-family:'JetBrains Mono',monospace;font-size:10px;color:#FF4D4D;letter-spacing:.16em;text-transform:uppercase">Sem permissão</span>
+      </div>
+      <span style="font-family:'Archivo Black',sans-serif;font-size:24px;text-transform:uppercase;line-height:1.05">Acesso negado</span>
+      <span style="font-size:14px;color:rgba(255,255,255,.6);line-height:1.5">Esta conta não está cadastrada no sistema.</span>
+      <div id="denied-email" style="background:#000;border:1px solid rgba(255,255,255,.12);padding:12px;font-family:'JetBrains Mono',monospace;font-size:12px;color:rgba(255,255,255,.6);word-break:break-all">—</div>
+      <span style="font-size:13px;color:rgba(255,255,255,.35);line-height:1.5">Entre em contato com a gestora para solicitar acesso.</span>
+    </div>
+  </div>
+</div>
+
+<!-- ════════════════════════════════════════════════════════
+     LOJA (vendedor)
+     ════════════════════════════════════════════════════════ -->
+<div id="view-store" class="view">
+  <div class="shell">
+
+    <aside class="sidebar">
+      <div class="sidebar-top">
+        <div class="sidebar-logo">C</div>
+        <div style="display:flex;flex-direction:column;gap:1px">
+          <span class="sidebar-brand">Lista da Vez</span>
+          <span class="sidebar-role">VENDEDOR</span>
+        </div>
+      </div>
+      <div class="sidebar-navlabel">NAVEGAÇÃO</div>
+      <nav class="sidebar-nav">
+        <button class="nav-btn on" data-tab="sec-fila" onclick="storeNav('sec-fila')">Fila da vez</button>
+        <button class="nav-btn" data-tab="sec-entrar" onclick="storeNav('sec-entrar')">Entrar na fila</button>
+      </nav>
+      <div class="sidebar-footer">
+        <div class="sidebar-dashes"></div>
+        <div class="sidebar-user">
+          <div class="sidebar-avatar" id="store-avatar">—</div>
+          <div style="flex:1;display:flex;flex-direction:column;gap:1px;overflow:hidden">
+            <span class="sidebar-user-name" id="store-name">—</span>
+            <span class="sidebar-user-scope" id="store-scope">—</span>
+          </div>
+          <button class="logout-btn" title="Sair" onclick="google.script.run.withSuccessHandler(()=>location.reload()).withFailureHandler(()=>location.reload())">⏻</button>
+        </div>
+      </div>
+    </aside>
+
+    <div class="main-content">
+      <div class="mobile-header">
+        <div class="mobile-brand">
+          <div class="mobile-logo">C</div>
+          <div>
+            <span class="mobile-title" id="store-tab-title">Fila da vez</span>
+            <span class="mobile-scope" id="store-scope-mobile">—</span>
+          </div>
+        </div>
+        <span class="live-indicator"><span class="live-dot"></span><span id="store-clock">—</span></span>
+      </div>
+
+      <div class="scroll-area">
+        <div id="sec-fila" class="section active"></div>
+        <div id="sec-entrar" class="section"></div>
+      </div>
+    </div>
+  </div>
+
+  <nav class="bottom-nav" style="grid-template-columns:repeat(2,1fr)">
+    <button class="bottom-nav-btn on" data-tab="sec-fila" onclick="storeNav('sec-fila')">Fila</button>
+    <button class="bottom-nav-btn" data-tab="sec-entrar" onclick="storeNav('sec-entrar')">Entrar</button>
+  </nav>
+</div>
+
+<!-- ════════════════════════════════════════════════════════
+     GESTORA (admin)
+     ════════════════════════════════════════════════════════ -->
+<div id="view-admin" class="view">
+  <div class="shell">
+
+    <aside class="sidebar">
+      <div class="sidebar-top">
+        <div class="sidebar-logo">C</div>
+        <div style="display:flex;flex-direction:column;gap:1px">
+          <span class="sidebar-brand">Lista da Vez</span>
+          <span class="sidebar-role">PAINEL GESTORA</span>
+        </div>
+      </div>
+      <div class="sidebar-navlabel">NAVEGAÇÃO</div>
+      <nav class="sidebar-nav">
+        <button class="nav-btn on" data-tab="sec-overview"  onclick="adminNav('sec-overview')">Dashboard</button>
+        <button class="nav-btn"    data-tab="sec-filas"     onclick="adminNav('sec-filas')">Filas ao vivo</button>
+        <button class="nav-btn"    data-tab="sec-ranking"   onclick="adminNav('sec-ranking')">Ranking</button>
+        <button class="nav-btn"    data-tab="sec-historico" onclick="adminNav('sec-historico')">Histórico</button>
+        <button class="nav-btn"    data-tab="sec-analise"   onclick="adminNav('sec-analise')">Análise individual</button>
+        <button class="nav-btn"    data-tab="sec-config"    onclick="adminNav('sec-config')">Configurações</button>
+      </nav>
+      <div class="sidebar-footer">
+        <div class="sidebar-dashes"></div>
+        <div class="sidebar-user">
+          <div class="sidebar-avatar" id="admin-avatar">—</div>
+          <div style="flex:1;display:flex;flex-direction:column;gap:1px;overflow:hidden">
+            <span class="sidebar-user-name" id="admin-name">—</span>
+            <span class="sidebar-user-scope" id="admin-scope">—</span>
+          </div>
+          <button class="logout-btn" title="Sair" onclick="google.script.run.withSuccessHandler(()=>location.reload()).withFailureHandler(()=>location.reload())">⏻</button>
+        </div>
+      </div>
+    </aside>
+
+    <div class="main-content">
+      <div class="mobile-header">
+        <div class="mobile-brand">
+          <div class="mobile-logo">C</div>
+          <div>
+            <span class="mobile-title" id="admin-tab-title">Dashboard</span>
+            <span class="mobile-scope" id="admin-scope-mobile">—</span>
+          </div>
+        </div>
+        <div style="display:flex;align-items:center;gap:10px">
+          <span class="live-indicator"><span class="live-dot"></span><span id="admin-clock">—</span></span>
+          <button class="btn-reload compact" onclick="atualizarPainel()" title="Atualizar filas"><span class="ico">↻</span></button>
+        </div>
+      </div>
+
+      <div class="topbar admin-topbar">
+        <span class="h-page" id="admin-tab-title-desktop">Dashboard</span>
+        <span style="flex:1"></span>
+        <select id="filtro-loja" class="sel" onchange="onFiltroChange()">
+          <option value="">Todas as lojas</option>
+        </select>
+        <select id="filtro-periodo" class="sel" onchange="onFiltroChange()">
+          <option value="hoje">Hoje</option>
+          <option value="7">Últimos 7 dias</option>
+          <option value="30">Últimos 30 dias</option>
+        </select>
+        <button class="btn-reload" onclick="atualizarPainel()" title="Atualizar filas e métricas"><span class="ico">↻</span>Atualizar</button>
+        <button class="btn-export" onclick="abrirModalExportar()">Exportar</button>
+      </div>
+
+      <div class="scroll-area">
+        <div id="sec-overview"  class="section active"></div>
+        <div id="sec-filas"     class="section"></div>
+        <div id="sec-ranking"   class="section"></div>
+        <div id="sec-historico" class="section"></div>
+        <div id="sec-analise"   class="section"></div>
+        <div id="sec-config"    class="section"></div>
+      </div>
+    </div>
+  </div>
+
+  <nav class="bottom-nav" style="grid-template-columns:repeat(5,1fr)">
+    <button class="bottom-nav-btn on" data-tab="sec-overview"  onclick="adminNav('sec-overview')">Dash</button>
+    <button class="bottom-nav-btn"    data-tab="sec-filas"     onclick="adminNav('sec-filas')">Filas</button>
+    <button class="bottom-nav-btn"    data-tab="sec-ranking"   onclick="adminNav('sec-ranking')">Rank</button>
+    <button class="bottom-nav-btn"    data-tab="sec-historico" onclick="adminNav('sec-historico')">Hist.</button>
+    <button class="bottom-nav-btn"    data-tab="mais"          onclick="abrirModalMais()">Mais</button>
+  </nav>
+</div>
+
+<!-- ════════════════════════════════════════════════════════
+     MODAL: SAIR DA FILA (reversível)
+     ════════════════════════════════════════════════════════ -->
+<div id="overlay-sair" class="overlay" onclick="if(event.target===this)fecharModal('overlay-sair')">
+  <div class="modal-box">
+    <span class="label-mono">Reversível</span>
+    <span class="modal-title">Sair da fila</span>
+    <span class="modal-sub" id="sair-texto"></span>
+    <div class="modal-actions">
+      <button class="btn-cancel" onclick="fecharModal('overlay-sair')">Cancelar</button>
+      <button class="btn-neutral" onclick="confirmarSair()">Sair da fila</button>
+    </div>
+  </div>
+</div>
+
+<!-- ════════════════════════════════════════════════════════
+     MODAL: PAUSA (ausência momentânea)
+     ════════════════════════════════════════════════════════ -->
+<div id="overlay-pausa" class="overlay" onclick="if(event.target===this)fecharModal('overlay-pausa')">
+  <div class="modal-box">
+    <span class="label-mono">Ausência momentânea</span>
+    <span class="modal-title">Sair um pouco</span>
+    <span class="modal-sub" id="pausa-quem"></span>
+    <div class="pausa-opts">
+      <button class="pausa-opt mantem" onclick="confirmarPausa('banheiro')">
+        <span class="t">Banheiro</span>
+        <span class="s">Mantém sua posição na fila.</span>
+      </button>
+      <button class="pausa-opt" onclick="confirmarPausa('pessoal')">
+        <span class="t">Pessoal</span>
+        <span class="s">Vai para o fim da fila ao voltar.</span>
+      </button>
+      <button class="pausa-opt" onclick="confirmarPausa('intervalo')">
+        <span class="t">Intervalo</span>
+        <span class="s">Vai para o fim da fila ao voltar.</span>
+      </button>
+    </div>
+    <div class="modal-actions" style="grid-template-columns:1fr">
+      <button class="btn-cancel" onclick="fecharModal('overlay-pausa')">Cancelar</button>
+    </div>
+  </div>
+</div>
+
+<!-- ════════════════════════════════════════════════════════
+     MODAL: REGISTRAR ATENDIMENTO
+     ════════════════════════════════════════════════════════ -->
+<div id="overlay-reg" class="overlay sheet" onclick="if(event.target===this)fecharModal('overlay-reg')">
+  <div class="sheet-box">
+    <div style="display:flex;flex-direction:column;gap:4px">
+      <span class="modal-title">Registrar atendimento</span>
+      <span class="label-mono" id="reg-quem" style="text-transform:none"></span>
+    </div>
+    <div class="result-grid">
+      <button id="btn-venda" class="btn-result" onclick="selResultado('venda')">Venda</button>
+      <button id="btn-perda" class="btn-result" onclick="selResultado('perda')">Perda</button>
+      <button id="btn-troca" class="btn-result" onclick="toggleTroca()">Troca / Ajuste</button>
+    </div>
+    <div id="motivos-wrap" style="display:none;flex-direction:column;gap:10px">
+      <span class="label-mono">Motivo da perda</span>
+      <div id="motivos-grid" style="display:flex;flex-wrap:wrap;gap:6px"></div>
+      <div id="produto-esp-wrap" class="produto-esp-wrap">
+        <span class="label-mono">Qual produto o cliente procurava?</span>
+        <input id="reg-produto-txt" class="field-input" maxlength="120"
+               placeholder="Escreva do jeito que a cliente pediu"
+               oninput="onProdutoEspInput()"
+               onkeydown="if(event.key==='Enter')confirmarAtend()">
+        <span class="produto-esp-hint">Vai para a gestora do jeito que você escrever — sem lista fechada.</span>
+      </div>
+    </div>
+    <div id="reg-nota" class="reg-nota"></div>
+    <div class="modal-actions wide-confirm">
+      <button class="btn-cancel" onclick="fecharModal('overlay-reg')">Cancelar</button>
+      <button id="btn-confirmar-reg" onclick="confirmarAtend()" style="border:0;padding:17px;font-size:12px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;cursor:pointer"></button>
+    </div>
+  </div>
+</div>
+
+<!-- ════════════════════════════════════════════════════════
+     MODAL: ADICIONAR VENDEDOR
+     ════════════════════════════════════════════════════════ -->
+<div id="overlay-add" class="overlay" onclick="if(event.target===this)fecharModal('overlay-add')">
+  <div class="modal-box">
+    <span class="modal-title">Adicionar vendedor</span>
+    <span class="label-mono" id="add-loja-nome" style="text-transform:none"></span>
+    <div style="display:flex;flex-direction:column;gap:8px">
+      <span class="label-mono">Nome completo</span>
+      <input id="add-nome" class="field-input" placeholder="Ex.: Larissa Coelho" oninput="onNovoNomeInput()" onkeydown="if(event.key==='Enter')confirmarAdicao()">
+    </div>
+    <div class="modal-actions">
+      <button class="btn-cancel" onclick="fecharModal('overlay-add')">Cancelar</button>
+      <button id="btn-confirmar-add" onclick="confirmarAdicao()" style="border:0;padding:17px;font-size:12px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;cursor:pointer">Adicionar</button>
+    </div>
+  </div>
+</div>
+
+<!-- ════════════════════════════════════════════════════════
+     MODAL: REMOVER VENDEDOR (irreversível)
+     ════════════════════════════════════════════════════════ -->
+<div id="overlay-remove" class="overlay" onclick="if(event.target===this)fecharModal('overlay-remove')">
+  <div class="modal-box danger">
+    <div style="display:flex;align-items:center;gap:10px">
+      <span style="width:22px;height:22px;background:#FF4D4D;color:#111;display:flex;align-items:center;justify-content:center;font-family:'Archivo Black',sans-serif;font-size:13px">!</span>
+      <span class="label-mono" style="color:#FF4D4D">Irreversível</span>
+    </div>
+    <span class="modal-title" id="remove-titulo"></span>
+    <span class="modal-sub">Apaga o cadastro e <strong>todo o histórico de atendimentos</strong> desta pessoa. Os números da loja e do ranking mudam. Não dá para desfazer.</span>
+    <div class="modal-actions">
+      <button class="btn-cancel" onclick="fecharModal('overlay-remove')">Cancelar</button>
+      <button class="btn-danger" onclick="confirmarRemocao()">Remover tudo</button>
+    </div>
+  </div>
+</div>
+
+<!-- ════════════════════════════════════════════════════════
+     MODAL: EXPORTAR PLANILHA
+     ════════════════════════════════════════════════════════ -->
+<div id="overlay-export" class="overlay" onclick="if(event.target===this)fecharModal('overlay-export')">
+  <div class="modal-box wide">
+    <span class="modal-title">Exportar planilha</span>
+    <span class="modal-sub">Gera um arquivo no Drive com abas por loja, ranking e histórico por vendedor.</span>
+    <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px">
+      <div style="display:flex;flex-direction:column;gap:6px">
+        <span class="label-mono">LOJA</span>
+        <select id="exp-loja" class="sel" style="width:100%"><option value="">Todas</option></select>
+      </div>
+      <div style="display:flex;flex-direction:column;gap:6px">
+        <span class="label-mono">INÍCIO</span>
+        <input type="date" id="exp-inicio" class="field-input" style="font-family:'JetBrains Mono',monospace;font-size:13px;padding:12px">
+      </div>
+      <div style="display:flex;flex-direction:column;gap:6px">
+        <span class="label-mono">FIM</span>
+        <input type="date" id="exp-fim" class="field-input" style="font-family:'JetBrains Mono',monospace;font-size:13px;padding:12px">
+      </div>
+    </div>
+    <div id="exp-resultado" style="display:none;background:#000;border-left:4px solid #E86A33;padding:16px;flex-direction:column;gap:6px">
+      <span class="label-mono" style="color:#E86A33" id="exp-linhas"></span>
+      <a id="exp-link" href="#" target="_blank" style="font-size:14px;font-weight:600">Abrir no Google Sheets →</a>
+    </div>
+    <div class="modal-actions wide-confirm">
+      <button class="btn-cancel" onclick="fecharModal('overlay-export')">Fechar</button>
+      <button id="btn-exportar" onclick="gerarExportacao()" style="border:0;padding:16px 20px;font-size:12px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;cursor:pointer;box-shadow:4px 4px 0 #000;background:#E86A33;color:#111">Gerar planilha</button>
+    </div>
+  </div>
+</div>
+
+<!-- ════════════════════════════════════════════════════════
+     SHEET: MAIS (mobile admin)
+     ════════════════════════════════════════════════════════ -->
+<div id="overlay-mais" class="overlay sheet" onclick="if(event.target===this)fecharModal('overlay-mais')">
+  <div class="sheet-box">
+    <span class="label-mono" style="margin-bottom:6px">Mais</span>
+    <button onclick="fecharModal('overlay-mais');adminNav('sec-analise')" style="background:transparent;color:#fff;border:1px solid rgba(255,255,255,.25);padding:16px;font-size:12px;font-weight:700;letter-spacing:.12em;text-transform:uppercase;cursor:pointer;text-align:left">Análise individual</button>
+    <button onclick="fecharModal('overlay-mais');adminNav('sec-config')" style="background:transparent;color:#fff;border:1px solid rgba(255,255,255,.25);padding:16px;font-size:12px;font-weight:700;letter-spacing:.12em;text-transform:uppercase;cursor:pointer;text-align:left">Configurações</button>
+    <button onclick="fecharModal('overlay-mais');abrirModalExportar()" style="background:transparent;border:1px solid rgba(255,255,255,.25);color:#fff;padding:16px;font-size:12px;font-weight:700;letter-spacing:.12em;text-transform:uppercase;cursor:pointer;text-align:left">Exportar planilha</button>
+  </div>
+</div>
+
+<?!= include('JavaScript'); ?>
+</body>
+</html>

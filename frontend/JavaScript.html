@@ -1,0 +1,1168 @@
+<script>
+
+const MOTIVOS = [
+  'Preço', 'Só tô olhando', 'Vai pensar mais', 'Produto específico',
+  'Tamanho', 'Objeção ao material', 'Não gostou de nada', 'Não sei o motivo',
+];
+
+// Único motivo que abre o campo de texto livre. O texto NÃO vira motivo —
+// vai numa coluna própria (ver COL.PRODUTO_ESP em Código.gs).
+const MOTIVO_PRODUTO_ESP = 'Produto específico';
+
+// Ausências momentâneas (REGRAS). O efeito na fila é decidido no backend a
+// partir do tipoPausa gravado — aqui só rotulamos.
+const PAUSA_TIPOS = {
+  banheiro:  { label: 'Banheiro',  toast: v => v + ' foi ao banheiro' },
+  pessoal:   { label: 'Pessoal',   toast: v => v + ' saiu (pessoal)' },
+  intervalo: { label: 'Intervalo', toast: v => v + ' está no intervalo' },
+};
+const PAUSA_MANTEM_POSICAO = 'banheiro';
+
+const App = {
+  user: null, config: null,
+  tab: null,
+  fila: [],
+  polling: null,
+
+  // modal: registrar atendimento
+  regVend: null, regResultado: null, regMotivo: null, regTroca: false,
+  regProdutoTxt: '',
+  // modal: sair da fila
+  alvoSair: null,
+  // modal: pausa (ausência momentânea)
+  alvoPausa: null,
+  // modal: adicionar / remover vendedor
+  addLojaKey: null,
+  removeLojaKey: null, removeNome: null,
+
+  // gestora: filtros compartilhados (topbar + análise)
+  lojaFiltro: '', periodo: '7',
+  painel: null, ultimaAtualizacao: null,
+  configLojas: null,
+  analiseReady: false, analiseVend: '',
+};
+
+// ── UTILS ──────────────────────────────────────────────────
+function $(id) { return document.getElementById(id); }
+
+// Escapa texto para uso seguro dentro de innerHTML (posição de texto).
+function esc(s) {
+  const d = document.createElement('div');
+  d.textContent = s == null ? '' : String(s);
+  return d.innerHTML;
+}
+// Escapa um valor para uso seguro como argumento de string JS dentro
+// de um atributo onclick="...('VALOR')" (aspas simples + aspas do atributo).
+function attr(s) {
+  return String(s == null ? '' : s)
+    .replace(/\\/g, '\\\\')
+    .replace(/'/g, "\\'")
+    .replace(/&/g, '&amp;')
+    .replace(/"/g, '&quot;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
+
+let _toastTimer;
+function toast(msg, isErr) {
+  const el = $('toast');
+  el.textContent = msg;
+  el.className = isErr ? 'show err' : 'show';
+  clearTimeout(_toastTimer);
+  _toastTimer = setTimeout(() => el.classList.remove('show'), 2400);
+}
+
+function setLoading(on, msg) {
+  let el = $('loading-overlay');
+  if (!el) {
+    el = document.createElement('div');
+    el.id = 'loading-overlay';
+    el.className = 'loading-overlay';
+    el.innerHTML = '<div class="spinner"></div><span></span>';
+    document.body.appendChild(el);
+  }
+  el.querySelector('span').textContent = msg || 'Carregando…';
+  el.style.display = on ? 'flex' : 'none';
+}
+
+function call(fn, ...args) {
+  return new Promise((res, rej) => {
+    google.script.run.withSuccessHandler(res).withFailureHandler(rej)[fn](...args);
+  });
+}
+
+function hhmm(d) {
+  const dt = d instanceof Date ? d : new Date(d);
+  return String(dt.getHours()).padStart(2, '0') + ':' + String(dt.getMinutes()).padStart(2, '0');
+}
+function fmtHistData(ts) {
+  const d = new Date(ts);
+  return String(d.getDate()).padStart(2, '0') + '/' + String(d.getMonth() + 1).padStart(2, '0') + ' · ' + hhmm(d);
+}
+function ymd(d) {
+  return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+}
+function periodoParaDatas(periodo) {
+  const hoje = new Date();
+  const fim = ymd(hoje);
+  let inicioDate = new Date(hoje);
+  if (periodo !== 'hoje') inicioDate.setDate(inicioDate.getDate() - Number(periodo));
+  return { inicio: ymd(inicioDate), fim };
+}
+function curto(nome) { return (nome || '').replace(/^Shopping\s+/i, ''); }
+function initials(str) {
+  return (str || '?').split(/[\s@]/).filter(Boolean).slice(0, 2).map(s => s[0]).join('').toUpperCase();
+}
+
+// Texto de uma linha de histórico: motivo da perda quando existe, senão o
+// que aquele atendimento foi. Sem isto, uma troca pura apareceria como
+// "Venda concluída".
+function descricaoAtend(a) {
+  if (a.motivo) return a.motivo;
+  if (a.resultado === 'venda') return a.isTroca ? 'Venda concluída · troca/ajuste' : 'Venda concluída';
+  if (a.resultado === 'troca') return 'Troca / ajuste';
+  return '—';
+}
+
+// Badge do resultado — 'troca' é um terceiro estado, não uma perda.
+function badgeResultado(resultado) {
+  if (resultado === 'venda') return '<span class="badge-tag badge-v">VENDA</span>';
+  if (resultado === 'troca') return '<span class="badge-tag badge-t">TROCA</span>';
+  return '<span class="badge-tag badge-p">PERDA</span>';
+}
+
+function showView(id) {
+  document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
+  $(id).classList.add('active');
+}
+function abrirModal(id) { $(id).classList.add('open'); }
+function fecharModal(id) { $(id).classList.remove('open'); }
+
+function tickClock() {
+  const t = hhmm(new Date());
+  if ($('store-clock')) $('store-clock').textContent = t;
+  if ($('admin-clock')) $('admin-clock').textContent = t;
+}
+setInterval(tickClock, 30000);
+
+// ── BOOT ───────────────────────────────────────────────────
+async function boot() {
+  try {
+    const r = await call('verificarAcesso');
+    if (!r.ok) {
+      $('denied-email').textContent = r.msg || 'E-mail sem permissão de acesso.';
+      showView('view-denied');
+      return;
+    }
+    App.user = r.user;
+    App.config = r.config;
+    tickClock();
+    if (r.user.role === 'admin') {
+      setupAdmin();
+      showView('view-admin');
+      initAdmin();
+    } else {
+      setupStore();
+      showView('view-store');
+      initStore();
+    }
+  } catch (e) {
+    $('denied-email').textContent = 'Erro de conexão. Recarregue a página.';
+    showView('view-denied');
+    console.error(e);
+  }
+}
+document.addEventListener('DOMContentLoaded', boot);
+
+// ── SETUP DE UI ────────────────────────────────────────────
+function setupStore() {
+  const u = App.user;
+  const nome = u.email.split('@')[0];
+  $('store-avatar').textContent = initials(nome);
+  $('store-name').textContent = nome;
+  $('store-scope').textContent = curto(u.storeName).toUpperCase();
+  $('store-scope-mobile').textContent = curto(u.storeName).toUpperCase();
+}
+
+function setupAdmin() {
+  const u = App.user;
+  const nome = u.email.split('@')[0];
+  const lojas = App.config.lojas || [];
+  $('admin-avatar').textContent = initials(nome);
+  $('admin-name').textContent = nome;
+  const scope = 'ADMIN · ' + lojas.length + ' LOJA' + (lojas.length === 1 ? '' : 'S');
+  $('admin-scope').textContent = scope;
+  $('admin-scope-mobile').textContent = scope;
+
+  $('filtro-loja').innerHTML = '<option value="">Todas as lojas</option>' +
+    lojas.map(l => `<option value="${attr(l.key)}">${esc(l.name)}</option>`).join('');
+  $('exp-loja').innerHTML = '<option value="">Todas</option>' +
+    lojas.map(l => `<option value="${attr(l.key)}">${esc(curto(l.name))}</option>`).join('');
+}
+
+// ══════════════════════════════════════════════════════════
+// LOJA (vendedor)
+// ══════════════════════════════════════════════════════════
+function initStore() {
+  loadFila();
+  App.polling = setInterval(loadFila, 8000);
+  storeNav('sec-fila');
+}
+
+const STORE_TITLES = { 'sec-fila': 'Fila da vez', 'sec-entrar': 'Entrar na fila' };
+function storeNav(id) {
+  document.querySelectorAll('#view-store .section').forEach(s => s.classList.remove('active'));
+  $(id).classList.add('active');
+  document.querySelectorAll('#view-store [data-tab]').forEach(b => b.classList.toggle('on', b.dataset.tab === id));
+  $('store-tab-title').textContent = STORE_TITLES[id];
+  if (id === 'sec-fila') renderFila();
+  if (id === 'sec-entrar') renderEntrar();
+}
+
+// ── SINCRONIZAÇÃO DA FILA ──────────────────────────────────
+// Cada chamada google.script.run leva 1–3s. Sem proteção, um getFila
+// disparado ANTES de uma mutação pode responder DEPOIS dela e
+// sobrescrever a fila já atualizada — fazendo quem acabou de entrar
+// "sumir" da tela mesmo estando salvo na planilha.
+// _filaSeq muda a cada mutação confirmada; respostas de polling que
+// carregam uma sequência antiga são descartadas.
+let _filaSeq = 0;
+let _filaBusy = 0;
+
+async function loadFila() {
+  if (_filaBusy) return;              // não atropela mutação em andamento
+  const seq = _filaSeq;
+  try {
+    const r = await call('getFila', App.user.storeKey);
+    if (!r.ok) return;
+    if (_filaBusy || seq !== _filaSeq) return;   // resposta obsoleta → descarta
+    App.fila = r.fila;
+    if ($('sec-fila').classList.contains('active')) renderFila();
+  } catch (e) { console.error(e); }
+}
+
+// Toda alteração de fila passa por aqui: aplica o retorno do backend
+// como verdade e invalida qualquer polling que estava em voo.
+async function mutarFila(fn, ...args) {
+  _filaBusy++;
+  try {
+    const r = await call(fn, ...args);
+    if (r && r.ok && r.fila) {
+      _filaSeq++;
+      App.fila = r.fila;
+      if ($('sec-fila').classList.contains('active')) renderFila();
+    }
+    return r;
+  } finally { _filaBusy--; }
+}
+
+function renderFila() {
+  const lista = App.fila || [];
+  const hotItem = lista.find(f => f.status === 'aguardando');
+  const resumo = lista.length ? lista.length + ' NA FILA · ' + hhmm(new Date()) : 'FILA VAZIA';
+
+  let html = `<div style="display:flex;align-items:center;justify-content:space-between">
+    <span class="h-section">Fila de hoje</span>
+    <span class="live-indicator"><span class="live-dot"></span>${resumo}</span>
+  </div>`;
+
+  if (!lista.length) {
+    html += `<div class="empty-box" style="align-items:center;text-align:center">
+      <span class="t">Ninguém na fila</span>
+      <span class="s">A vez ainda não começou hoje — entre na fila para abrir o atendimento da loja.</span>
+      <button class="entrar-cta" style="width:auto;margin-top:6px" onclick="storeNav('sec-entrar')">Entrar na fila</button>
+    </div>`;
+  } else {
+    html += '<div class="grid-fila">' + lista.map((f, i) => filaCardHtml(f, i, hotItem)).join('') + '</div>';
+  }
+
+  html += `<div style="border-top:1px solid rgba(255,255,255,.12);padding-top:14px;display:flex;justify-content:space-between;font-family:'JetBrains Mono',monospace;font-size:10px;color:rgba(255,255,255,.35);letter-spacing:.12em">
+    <span>ATUALIZADO</span><span style="color:#E86A33">${hhmm(new Date())}</span>
+  </div>`;
+
+  $('sec-fila').innerHTML = html;
+}
+
+function filaCardHtml(f, i, hotItem) {
+  const hot = hotItem && f.vend === hotItem.vend;
+  const pausa = f.status === 'pausa';
+  const cardCls = 'fcard' + (hot ? ' hot' : '') + (pausa ? ' pausa' : '');
+  const tag = hot ? `<span class="tag tag-hot">PRÓXIMO</span>`
+    : pausa ? `<span class="tag tag-out">${esc(rotuloPausa(f))}</span>` : '';
+  const meta = (pausa ? 'PAUSA DESDE ' : 'NA FILA DESDE ') + hhmm(f.entrou);
+
+  let actions;
+  if (hot) {
+    // Quem está na vez também precisa poder sair um pouco sem abrir mão
+    // do lugar — é exatamente o caso do banheiro nas REGRAS.
+    actions = `<button class="btn-dark" onclick="abrirRegistro('${attr(f.vend)}')">Registrar atendimento</button>
+               <button class="btn-ghost" onclick="abrirPausa('${attr(f.vend)}')">Pausa</button>
+               <button class="btn-ghost" onclick="abrirSair('${attr(f.vend)}')">Sair</button>`;
+  } else if (pausa) {
+    actions = `<button class="btn-ghost" onclick="voltarPausa('${attr(f.vend)}')">Voltar</button>
+               <button class="btn-ghost" onclick="abrirSair('${attr(f.vend)}')">Sair</button>`;
+  } else {
+    actions = `<button class="btn-ghost" onclick="abrirPausa('${attr(f.vend)}')">Pausa</button>
+               <button class="btn-ghost" onclick="abrirSair('${attr(f.vend)}')">Sair</button>`;
+  }
+
+  return `<div class="${cardCls}">
+    <div class="top">
+      <div class="pos">${String(i + 1).padStart(2, '0')}</div>
+      <div style="flex:1;display:flex;flex-direction:column;gap:5px;min-width:0">
+        ${tag}
+        <span class="name">${esc(f.vend)}</span>
+        <span class="meta">${meta}</span>
+      </div>
+    </div>
+    <div class="actions">${actions}</div>
+  </div>`;
+}
+
+function renderEntrar() {
+  const naFila = new Set((App.fila || []).map(f => f.vend));
+  const todos = App.config.vendedores || [];
+  const disponiveis = todos.filter(v => !naFila.has(v));
+  const posPrevista = String((App.fila || []).length + 1).padStart(2, '0');
+
+  let html = `<div style="max-width:520px;display:flex;flex-direction:column;gap:18px">
+    <div style="display:flex;flex-direction:column;gap:6px">
+      <span class="h-section">Entrar na fila</span>
+      <span style="font-size:14px;color:rgba(255,255,255,.6);line-height:1.5">Escolha o nome e entre. Você vai para o fim da fila.</span>
+    </div>`;
+
+  if (disponiveis.length) {
+    html += `<div style="display:flex;flex-direction:column;gap:8px">
+      <span class="label-mono">Vendedor</span>
+      <select id="sel-entrar" class="sel" style="width:100%;padding:16px;font-size:15px">
+        ${disponiveis.map(v => `<option value="${attr(v)}">${esc(v)}</option>`).join('')}
+      </select>
+    </div>
+    <button class="entrar-cta" onclick="confirmarEntrar()">Entrar na fila</button>`;
+  } else {
+    html += `<div class="empty-box">
+      <span class="t" style="font-size:14px">Toda a equipe já está na fila</span>
+      <span class="s">Volte para a fila e registre o próximo atendimento.</span>
+    </div>`;
+  }
+
+  html += `<div class="posicao-box">
+      <span class="label-mono">POSIÇÃO PREVISTA</span>
+      <span style="font-family:'Archivo Black',sans-serif;font-size:22px;color:#E86A33">${posPrevista}</span>
+    </div>
+  </div>`;
+
+  $('sec-entrar').innerHTML = html;
+}
+
+async function confirmarEntrar() {
+  const sel = $('sel-entrar');
+  if (!sel || !sel.value) return;
+  const vend = sel.value;
+  try {
+    const r = await mutarFila('entrarFila', App.user.storeKey, vend);
+    if (!r.ok) return toast(r.msg, true);
+    toast(vend + ' entrou na fila');
+    storeNav('sec-fila');
+  } catch (e) { toast('Erro ao entrar na fila.', true); }
+}
+
+// "EM PAUSA · BANHEIRO" — o time entende de relance o que esperar.
+function rotuloPausa(f) {
+  const t = PAUSA_TIPOS[f.tipoPausa];
+  return 'EM PAUSA' + (t ? ' · ' + t.label.toUpperCase() : '');
+}
+
+// ── MODAL: PAUSA ────────────────────────────────────────────
+function abrirPausa(vend) {
+  App.alvoPausa = vend;
+  $('pausa-quem').textContent = vend + ' sai da fila por um momento. O que muda na volta depende do motivo:';
+  abrirModal('overlay-pausa');
+}
+async function confirmarPausa(tipo) {
+  const vend = App.alvoPausa;
+  fecharModal('overlay-pausa');
+  try {
+    const r = await mutarFila('setFilaStatus', App.user.storeKey, vend, 'pausa', tipo);
+    if (r.ok) toast(PAUSA_TIPOS[tipo].toast(vend));
+  } catch (e) { toast('Erro.', true); }
+}
+
+async function voltarPausa(vend) {
+  // Lê o tipo antes da chamada — o backend limpa o campo ao devolver a fila.
+  const item = (App.fila || []).find(f => f.vend === vend);
+  const manteve = !item || !item.tipoPausa || item.tipoPausa === PAUSA_MANTEM_POSICAO;
+  try {
+    const r = await mutarFila('voltarDaPausa', App.user.storeKey, vend);
+    if (!r.ok) return;
+    if (!manteve) return toast(vend + ' voltou — foi para o fim da fila');
+    const naVez = (r.fila.find(f => f.status === 'aguardando') || {}).vend === vend;
+    toast(vend + (naVez ? ' voltou — está na vez' : ' voltou — manteve a posição'));
+  } catch (e) { toast('Erro.', true); }
+}
+
+// ── MODAL: SAIR DA FILA ─────────────────────────────────────
+function abrirSair(vend) {
+  App.alvoSair = vend;
+  $('sair-texto').textContent = vend + ' sai da fila agora. Dá para entrar de novo a qualquer momento.';
+  abrirModal('overlay-sair');
+}
+async function confirmarSair() {
+  const vend = App.alvoSair;
+  fecharModal('overlay-sair');
+  try {
+    const r = await mutarFila('sairFila', App.user.storeKey, vend);
+    if (r.ok) toast(vend + ' saiu da fila.');
+  } catch (e) { toast('Erro.', true); }
+}
+
+// ── MODAL: REGISTRAR ATENDIMENTO ────────────────────────────
+function abrirRegistro(vend) {
+  App.regVend = vend; App.regResultado = null; App.regMotivo = null; App.regTroca = false;
+  App.regProdutoTxt = '';
+  $('reg-quem').textContent = vend + ' · ' + hhmm(new Date());
+  renderRegModal();
+  abrirModal('overlay-reg');
+}
+
+// Resultado efetivo da combinação escolhida: venda e perda mandam; troca
+// vira resultado próprio só quando está sozinha. Devolve null enquanto
+// nada foi escolhido.
+function resultadoAtual() {
+  if (App.regResultado) return App.regResultado;
+  return App.regTroca ? 'troca' : null;
+}
+
+function renderRegModal() {
+  $('btn-venda').className = 'btn-result' + (App.regResultado === 'venda' ? ' on-venda' : '');
+  $('btn-perda').className = 'btn-result' + (App.regResultado === 'perda' ? ' on-perda' : '');
+  $('btn-troca').className = 'btn-result' + (App.regTroca ? ' on-troca' : '');
+
+  const mw = $('motivos-wrap');
+  if (App.regResultado === 'perda') {
+    mw.style.display = 'flex';
+    $('motivos-grid').innerHTML = MOTIVOS.map(m =>
+      `<button class="chip ${App.regMotivo === m ? 'on' : ''}" onclick="selMotivo('${attr(m)}')">${esc(m)}</button>`
+    ).join('');
+  } else {
+    mw.style.display = 'none';
+  }
+
+  // Campo livre: só existe quando o motivo é exatamente "Produto específico"
+  const pw = $('produto-esp-wrap');
+  const pedeProduto = App.regResultado === 'perda' && App.regMotivo === MOTIVO_PRODUTO_ESP;
+  pw.classList.toggle('on', pedeProduto);
+  if ($('reg-produto-txt').value !== App.regProdutoTxt) $('reg-produto-txt').value = App.regProdutoTxt;
+
+  // A vez só gira quando houve venda — mesma regra do backend.
+  const res  = resultadoAtual();
+  const nota = $('reg-nota');
+  if (!res) {
+    nota.className = 'reg-nota';
+    nota.textContent = 'ESCOLHA O RESULTADO — TROCA/AJUSTE PODE VIR SOZINHA OU JUNTO';
+  } else if (res === 'venda') {
+    nota.className = 'reg-nota gira';
+    nota.textContent = 'A VEZ GIRA — VOCÊ VOLTA PARA O FIM DA FILA';
+  } else {
+    nota.className = App.regTroca ? 'reg-nota mantem' : 'reg-nota gira';
+    nota.textContent = App.regTroca
+      ? 'A VEZ NÃO GIRA — CONTINUA COM QUEM ESTÁ'
+      : 'A VEZ GIRA — VOCÊ VOLTA PARA O FIM DA FILA';
+  }
+
+  const btn = $('btn-confirmar-reg');
+  btn.setAttribute('data-state', res || 'idle');
+  btn.className = 'confirm-btn';
+  btn.textContent = res === 'venda' ? 'Registrar venda'
+    : res === 'perda' ? 'Registrar perda'
+    : res === 'troca' ? 'Registrar troca/ajuste'
+    : 'Escolha o resultado';
+}
+
+// Venda e Perda são um par exclusivo — e clicar de novo no que já está
+// marcado desmarca, voltando ao estado "nada escolhido". Nenhum dos dois
+// mexe no toggle de troca.
+function selResultado(r) {
+  App.regResultado = App.regResultado === r ? null : r;
+  App.regMotivo = null; App.regProdutoTxt = '';
+  renderRegModal();
+}
+function selMotivo(m) {
+  if (App.regMotivo !== m) App.regProdutoTxt = '';   // trocou de motivo → limpa o texto
+  App.regMotivo = m;
+  renderRegModal();
+  if (m === MOTIVO_PRODUTO_ESP) setTimeout(() => $('reg-produto-txt').focus(), 60);
+}
+function onProdutoEspInput() { App.regProdutoTxt = $('reg-produto-txt').value; }
+// Toggle independente: não limpa venda/perda nem é limpo por elas.
+function toggleTroca() { App.regTroca = !App.regTroca; renderRegModal(); }
+
+async function confirmarAtend() {
+  const resultado = resultadoAtual();
+  if (!resultado) return toast('Selecione o resultado.', true);
+  // Perda exige motivo com ou sem troca junto.
+  if (resultado === 'perda' && !App.regMotivo) return toast('Selecione o motivo.', true);
+
+  const vend = App.regVend;
+  // Troca sozinha não tem motivo nem produto — nada foi perdido, só não
+  // foi venda.
+  const motivo = resultado === 'perda' ? (App.regMotivo || 'Não sei o motivo') : '';
+  // Obrigatório só quando o motivo é "Produto específico" — nos outros
+  // casos o campo nem aparece e vai vazio para a planilha.
+  const produtoTxt = motivo === MOTIVO_PRODUTO_ESP ? App.regProdutoTxt.trim() : '';
+  if (motivo === MOTIVO_PRODUTO_ESP && !produtoTxt) return toast('Escreva qual produto o cliente procurava.', true);
+
+  const troca = App.regTroca;
+  fecharModal('overlay-reg');
+  setLoading(true, 'Registrando…');
+  try {
+    const r = await mutarFila('registrarAtendimento', App.user.storeKey, App.user.storeName, vend, resultado, motivo, troca, produtoTxt);
+    if (r.ok) toast(toastAtend(resultado, troca));
+  } catch (e) { toast('Erro ao registrar.', true); }
+  finally { setLoading(false); }
+}
+
+// "vez mantida" só entra quando a fila realmente não girou — ou seja,
+// quando houve troca e não houve venda.
+function toastAtend(resultado, troca) {
+  if (resultado === 'venda') return troca ? 'Venda registrada · troca incluída' : 'Venda registrada';
+  if (resultado === 'troca') return 'Troca/ajuste registrado · vez mantida';
+  return troca ? 'Perda registrada · vez mantida' : 'Perda registrada';
+}
+
+// ══════════════════════════════════════════════════════════
+// GESTORA (admin)
+// ══════════════════════════════════════════════════════════
+function initAdmin() {
+  App.lojaFiltro = ''; App.periodo = '7';
+  $('filtro-loja').value = ''; $('filtro-periodo').value = '7';
+  loadPainel().then(() => adminNav('sec-overview'));
+  App.polling = setInterval(async () => { await loadPainel(); renderCurrentAdminSection(); }, 60 * 60 * 1000);
+}
+
+const ADMIN_TITLES = {
+  'sec-overview': 'Dashboard', 'sec-filas': 'Filas ao vivo', 'sec-ranking': 'Ranking',
+  'sec-historico': 'Histórico', 'sec-analise': 'Análise individual', 'sec-config': 'Configurações',
+};
+function adminNav(id) {
+  App.tab = id;
+  document.querySelectorAll('#view-admin .section').forEach(s => s.classList.remove('active'));
+  $(id).classList.add('active');
+  document.querySelectorAll('#view-admin .sidebar-nav [data-tab]').forEach(b => b.classList.toggle('on', b.dataset.tab === id));
+  document.querySelectorAll('#view-admin .bottom-nav [data-tab]').forEach(b => {
+    const t = b.dataset.tab;
+    b.classList.toggle('on', t === id || (t === 'mais' && (id === 'sec-analise' || id === 'sec-config')));
+  });
+  $('admin-tab-title').textContent = ADMIN_TITLES[id];
+  $('admin-tab-title-desktop').textContent = ADMIN_TITLES[id];
+
+  if (id === 'sec-overview') renderOverview();
+  if (id === 'sec-filas') renderFilasVivo();
+  if (id === 'sec-ranking') renderRanking();
+  if (id === 'sec-historico') renderHistorico();
+  if (id === 'sec-analise') { if (!App.analiseReady) { App.analiseReady = true; renderAnaliseShell(); } }
+  if (id === 'sec-config') loadConfig();
+}
+function abrirModalMais() { abrirModal('overlay-mais'); }
+
+function renderCurrentAdminSection() {
+  const map = { 'sec-overview': renderOverview, 'sec-filas': renderFilasVivo, 'sec-ranking': renderRanking, 'sec-historico': renderHistorico };
+  if (map[App.tab]) map[App.tab]();
+}
+
+async function loadPainel() {
+  try {
+    const r = await call('getPainelData', App.lojaFiltro || null, App.periodo);
+    if (r.ok) { App.painel = r; App.ultimaAtualizacao = new Date(); }
+  } catch (e) { toast('Erro ao carregar painel.', true); }
+}
+
+// ── ATUALIZAR MANUALMENTE (botão ↻) ────────────────────────
+// O painel da gestora recarrega sozinho só de hora em hora; este botão
+// busca as filas e métricas na hora, sem recarregar a página.
+let _refreshing = false;
+function reloadBtnHtml() {
+  return `<button class="btn-reload" onclick="atualizarPainel()"${_refreshing ? ' disabled' : ''}><span class="ico">↻</span>Atualizar</button>`;
+}
+function atualizadoHtml() {
+  return `<span class="label-mono">${App.ultimaAtualizacao ? 'ATUALIZADO ' + hhmm(App.ultimaAtualizacao) : '—'}</span>`;
+}
+function syncReloadBtns() {
+  document.querySelectorAll('.btn-reload').forEach(b => {
+    b.disabled = _refreshing;
+    b.classList.toggle('loading', _refreshing);
+  });
+}
+async function atualizarPainel() {
+  if (_refreshing) return;
+  _refreshing = true;
+  syncReloadBtns();
+  try {
+    await loadPainel();
+    renderCurrentAdminSection();
+    toast('Filas atualizadas');
+  } catch (e) {
+    toast('Erro ao atualizar.', true);
+  } finally {
+    _refreshing = false;
+    syncReloadBtns();   // re-consulta o DOM: a seção pode ter sido re-renderizada
+  }
+}
+
+async function onFiltroChange() {
+  App.lojaFiltro = $('filtro-loja').value;
+  App.periodo = $('filtro-periodo').value;
+  await loadPainel();
+  renderCurrentAdminSection();
+  if (App.tab === 'sec-analise' && App.analiseReady) {
+    $('an-loja').value = App.lojaFiltro;
+    $('an-periodo').value = App.periodo;
+    App.analiseVend = '';
+    await loadAnaliseVendedores();
+  }
+}
+
+// ── FILAS AO VIVO (compartilhado overview + tela dedicada) ─
+function buildLojasVivo() {
+  const p = App.painel; if (!p) return [];
+  const lojas = (App.config.lojas || []).filter(l => !App.lojaFiltro || l.key === App.lojaFiltro);
+  return lojas.map(l => {
+    const fila = (p.filas && p.filas[l.key]) || [];
+    const hotItem = fila.find(f => f.status === 'aguardando');
+    const ultimoReg = (p.recentes || []).find(r => r.lojaKey === l.key);
+    const gap = ultimoReg ? (Date.now() - new Date(ultimoReg.ts).getTime()) : Infinity;
+    const parado = gap > 2 * 3600000;
+    return {
+      key: l.key, nome: l.name, curto: curto(l.name),
+      fila, hotVend: hotItem ? hotItem.vend : null,
+      vazia: fila.length === 0,
+      qtd: fila.length ? fila.length + ' NA FILA' : 'VAZIA',
+      ultimoLabel: ultimoReg ? hhmm(new Date(ultimoReg.ts)) : 'SEM REGISTRO',
+      parado: !!(ultimoReg && parado),
+      semRegistro: !ultimoReg,
+    };
+  });
+}
+// comTipo só na visão completa: no preview do dashboard o espaço é curto e
+// um "PAUSA · INTERVALO" espremeria o nome do vendedor.
+function filaTagHtml(item, hotVend, comTipo) {
+  if (item.vend === hotVend) return `<span class="tag tag-hot">PRÓXIMO</span>`;
+  if (item.status === 'pausa') {
+    const t = comTipo && PAUSA_TIPOS[item.tipoPausa];
+    return `<span class="tag tag-out">PAUSA${t ? ' · ' + esc(t.label.toUpperCase()) : ''}</span>`;
+  }
+  return `<span class="tag tag-out">AGUARDA</span>`;
+}
+function lojaVivoPreviewHtml(l) {
+  const top3 = l.fila.slice(0, 3);
+  return `<div class="live-box">
+    <div style="display:flex;justify-content:space-between;align-items:baseline">
+      <span style="font-size:13px;font-weight:700;text-transform:uppercase;letter-spacing:.04em">${esc(l.curto)}</span>
+      <span style="font-family:'JetBrains Mono',monospace;font-size:10px;color:rgba(255,255,255,.35)">${l.qtd}</span>
+    </div>
+    ${top3.map((v, i) => `<div class="live-row">
+      <span style="font-family:'JetBrains Mono',monospace;font-size:11px;color:rgba(255,255,255,.35);min-width:20px">${String(i + 1).padStart(2, '0')}</span>
+      <span style="flex:1;font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(v.vend)}</span>
+      ${filaTagHtml(v, l.hotVend)}
+    </div>`).join('')}
+    ${l.vazia ? `<span style="font-family:'JetBrains Mono',monospace;font-size:10px;color:rgba(255,255,255,.35);border-top:1px solid rgba(255,255,255,.12);padding-top:10px">FILA VAZIA — NINGUÉM ATENDENDO</span>` : ''}
+  </div>`;
+}
+function lojaVivoFullHtml(l) {
+  const ultimoColor = (!l.semRegistro && !l.parado) ? '#E86A33' : '#FF4D4D';
+  const ultimoTxt = l.ultimoLabel + (l.parado ? ' · PARADO' : '');
+  return `<div class="box" style="padding:0;gap:0">
+    <div style="display:flex;align-items:center;justify-content:space-between;padding:16px 18px;border-bottom:1px solid rgba(255,255,255,.12)">
+      <span class="h-section" style="font-size:17px">${esc(l.curto)}</span>
+      <span class="live-indicator">${l.qtd}</span>
+    </div>
+    <div style="padding:14px 18px;display:flex;justify-content:space-between;gap:12px;border-bottom:1px solid rgba(255,255,255,.12);background:#000">
+      <span class="label-mono">ÚLTIMO REGISTRO</span>
+      <span style="font-family:'JetBrains Mono',monospace;font-size:12px;color:${ultimoColor}">${ultimoTxt}</span>
+    </div>
+    ${l.fila.map((v, i) => `<div class="live-full-row">
+      <span style="font-family:'Archivo Black',sans-serif;font-size:22px;min-width:34px;color:${v.vend === l.hotVend ? '#E86A33' : 'rgba(255,255,255,.3)'}">${String(i + 1).padStart(2, '0')}</span>
+      <span style="flex:1;font-size:15px;font-weight:600;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(v.vend)}</span>
+      <span style="font-family:'JetBrains Mono',monospace;font-size:11px;color:rgba(255,255,255,.35)">${hhmm(v.entrou)}</span>
+      ${filaTagHtml(v, l.hotVend, true)}
+    </div>`).join('')}
+    ${l.vazia ? `<div style="padding:24px 18px;display:flex;flex-direction:column;gap:6px">
+      <span style="font-size:14px;font-weight:600;color:rgba(255,255,255,.6)">Fila vazia</span>
+      <span style="font-size:13px;color:rgba(255,255,255,.35);line-height:1.5">Ninguém entrou na vez ainda hoje — vale um alô para a loja.</span>
+    </div>` : ''}
+  </div>`;
+}
+
+function renderFilasVivo() {
+  const lojasVivo = buildLojasVivo();
+  $('sec-filas').innerHTML = `
+    <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+      <span class="h-section">Filas ao vivo</span>
+      <span class="live-dot"></span>
+      <span style="flex:1"></span>
+      ${atualizadoHtml()}
+      ${reloadBtnHtml()}
+    </div>
+    <div class="grid-two-inner">${lojasVivo.map(l => lojaVivoFullHtml(l)).join('')}</div>`;
+}
+
+// ── PRODUTOS PEDIDOS (texto livre dos vendedores) ───────────
+// Regra do negócio: o texto é exibido exatamente como foi digitado.
+// Nada de normalizar, deduplicar por semelhança ou juntar lojas — cada
+// loja tem o próprio vocabulário para a mesma peça e o time entende os
+// próprios termos. O único agrupamento permitido é por loja e, dentro
+// da loja, contagem de repetição por string idêntica.
+function agruparProdutosPorLoja(lista) {
+  const ordem = [], mapa = {};
+  (lista || []).forEach(p => {
+    const loja = p.loja || '—';
+    if (!mapa[loja]) { mapa[loja] = { loja, itens: [] }; ordem.push(loja); }
+    mapa[loja].itens.push(p);
+  });
+  return ordem.map(k => {
+    const g = mapa[k], cont = {};
+    g.itens.forEach(p => { cont[p.produto] = (cont[p.produto] || 0) + 1; });
+    g.repetidos = Object.entries(cont)
+      .filter(([, n]) => n > 1)
+      .map(([produto, n]) => ({ produto, n }))
+      .sort((a, b) => b.n - a.n);
+    return g;
+  });
+}
+
+function produtosPedidosHtml(lista, opts) {
+  opts = opts || {};
+  const grupos = agruparProdutosPorLoja(lista);
+  if (!grupos.length) {
+    return `<span style="font-size:13px;color:rgba(255,255,255,.35);line-height:1.5">${
+      esc(opts.vazio || 'Nenhum produto específico registrado neste período.')}</span>`;
+  }
+  return grupos.map(g => {
+    const itens = opts.limite ? g.itens.slice(0, opts.limite) : g.itens;
+    const resto = g.itens.length - itens.length;
+    return `<div class="prod-loja">
+      <div class="prod-loja-head">
+        <span class="prod-loja-nome">${esc(curto(g.loja))}</span>
+        <span class="label-mono">${g.itens.length} ${g.itens.length === 1 ? 'PEDIDO' : 'PEDIDOS'}</span>
+      </div>
+      ${opts.repetidos && g.repetidos.length ? `<div class="prod-rep">${g.repetidos.map(r =>
+        `<span class="prod-rep-item"><span class="n">${r.n}×</span><span class="t">${esc(r.produto)}</span></span>`
+      ).join('')}</div>` : ''}
+      ${itens.map(p => `<div class="prod-row">
+        <span class="txt">${esc(p.produto)}</span>
+        <span class="quando">${fmtHistData(p.ts)}</span>
+      </div>`).join('')}
+      ${resto > 0 ? `<span class="label-mono" style="padding-top:10px">+ ${resto} ${resto === 1 ? 'PEDIDO' : 'PEDIDOS'} — VER EM HISTÓRICO</span>` : ''}
+    </div>`;
+  }).join('');
+}
+
+// ── OVERVIEW ────────────────────────────────────────────────
+function renderOverview() {
+  const p = App.painel; if (!p) return;
+  const lojasVivo = buildLojasVivo();
+  const rankSorted = [...(p.ranking || [])].sort((a, b) => b.tx - a.tx);
+  const destaque = rankSorted[0];
+  const alertas = lojasVivo.filter(l => l.parado || l.vazia);
+  const motArr = (p.motivos || []).slice(0, 6);
+  const maxMot = motArr.length ? motArr[0].n : 1;
+  const prods = p.produtosPedidos || [];
+  const periodoLabel = App.periodo === 'hoje' ? 'HOJE' : 'ÚLTIMOS ' + App.periodo + ' DIAS';
+  const lojaObj = App.lojaFiltro ? (App.config.lojas || []).find(l => l.key === App.lojaFiltro) : null;
+  const lojaLabel = lojaObj ? curto(lojaObj.name).toUpperCase() : 'TODAS AS LOJAS';
+
+  let html = `<div class="live-indicator"><span class="live-dot"></span>${periodoLabel} · ${lojaLabel} · ${p.total} REGISTROS</div>
+  <div class="grid-metric five">
+    <div class="metric-tile"><span class="label-mono">ATENDIMENTOS</span><span class="num-big">${p.total}</span></div>
+    <div class="metric-tile dark"><span class="label-mono" style="color:#E86A33">VENDAS</span><span class="num-big accent">${p.vendas}</span></div>
+    <div class="metric-tile"><span class="label-mono" style="color:#FF4D4D">PERDAS</span><span class="num-big red">${p.perdas}</span></div>
+    <div class="metric-tile"><span class="label-mono">TROCA/AJUSTE</span><span class="num-big">${p.trocas || 0}</span></div>
+    <div class="metric-tile"><span class="label-mono">CONVERSÃO</span><span class="num-big">${p.conversao}%</span></div>
+  </div>`;
+
+  if (!p.total) {
+    html += `<div class="empty-box"><span class="t">Ainda não há atendimentos neste período</span><span class="s">Amplie o período nos filtros ou registre o primeiro atendimento na fila da loja.</span></div>`;
+  }
+
+  html += `<div class="grid-two">
+    <div class="box">
+      <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+        <span class="h-card">Filas ao vivo</span><span class="live-dot"></span>
+        <span style="flex:1"></span>
+        ${atualizadoHtml()}
+        ${reloadBtnHtml()}
+      </div>
+      <div class="grid-two-inner">${lojasVivo.map(l => lojaVivoPreviewHtml(l)).join('')}</div>
+    </div>
+    <div class="box">
+      <span class="h-card">Destaque do dia</span>
+      ${destaque ? `<div class="destaque">
+        <span class="label-mono" style="color:inherit">MAIOR CONVERSÃO</span>
+        <span style="font-family:'Archivo Black',sans-serif;font-size:22px;text-transform:uppercase;line-height:1.05">${esc(destaque.vend)}</span>
+        <span style="font-family:'JetBrains Mono',monospace;font-size:12px;font-weight:700">${destaque.tx}% · ${destaque.total} ATENDIMENTOS</span>
+      </div>` : ''}
+      ${alertas.map(a => `<div class="alerta">
+        <span class="label-mono" style="color:#FF4D4D">ATENÇÃO</span>
+        <span style="font-size:14px;font-weight:600">${a.vazia ? esc(a.curto) + ' com fila vazia' : esc(a.curto) + ' sem registro há mais de 2h'}</span>
+        <span style="font-size:12px;color:rgba(255,255,255,.6);line-height:1.5">${a.vazia ? 'Ninguém entrou na vez hoje. Vale confirmar se o stand abriu.' : 'Último atendimento às ' + a.ultimoLabel + '. Vale checar se a fila travou.'}</span>
+      </div>`).join('')}
+    </div>
+  </div>
+  <div class="grid-two">
+    <div class="box">
+      <span class="h-card">Motivos de perda</span>
+      ${motArr.length ? motArr.map(m => `<div class="motivo-row">
+          <span class="motivo-label">${esc(m.motivo)}</span>
+          <div class="motivo-track"><div class="motivo-fill" style="width:${Math.round((m.n / maxMot) * 100)}%"></div></div>
+          <span style="font-family:'JetBrains Mono',monospace;font-size:12px;min-width:26px;text-align:right">${m.n}</span>
+        </div>`).join('') : `<span style="font-size:13px;color:rgba(255,255,255,.35);line-height:1.5">Sem perdas registradas neste período — nada a analisar por aqui.</span>`}
+    </div>
+    <div class="box">
+      <div style="display:flex;align-items:baseline;gap:10px;flex-wrap:wrap">
+        <span class="h-card">O que os clientes procuraram</span>
+        <span style="flex:1"></span>
+        ${prods.length ? `<span class="label-mono">${prods.length} NO TOTAL</span>` : ''}
+      </div>
+      ${produtosPedidosHtml(prods, { limite: 4, vazio: 'Nenhum pedido de produto específico neste período.' })}
+      ${prods.length > 0 ? `<button class="btn-ghost" style="align-self:flex-start" onclick="adminNav('sec-historico')">Ver todos</button>` : ''}
+    </div>
+  </div>`;
+
+  $('sec-overview').innerHTML = html;
+}
+
+// ── RANKING ─────────────────────────────────────────────────
+function renderRanking() {
+  const p = App.painel; if (!p) return;
+  const sorted = [...(p.ranking || [])].sort((a, b) => b.tx - a.tx);
+  const podio = sorted.slice(0, 3);
+
+  let html = '';
+  if (podio.length) {
+    html += `<div class="grid-podio">${podio.map((r, i) => `
+      <div class="podio-card ${i === 0 ? 'first' : ''}">
+        <span class="podio-num">${String(i + 1).padStart(2, '0')}</span>
+        <span style="font-family:'Archivo Black',sans-serif;font-size:20px;text-transform:uppercase;line-height:1.05">${esc(r.vend)}</span>
+        <span class="podio-sub">${esc(r.loja)}</span>
+        <span class="podio-taxa">${r.tx}%</span>
+      </div>`).join('')}</div>`;
+  }
+
+  html += `<div class="rank-table">
+    <div class="rank-head"><span>#</span><span>VENDEDOR</span><span class="col-loja">LOJA</span><span>ATEND.</span><span>VENDAS</span><span>CONVERSÃO</span></div>
+    ${sorted.map((r, i) => `<div class="rank-row">
+      <span class="num">${String(i + 1).padStart(2, '0')}</span>
+      <span class="name">${esc(r.vend)}</span>
+      <span class="col-loja">${esc(r.loja)}</span>
+      <span class="tot">${r.total}</span>
+      <span class="ven">${r.vendas}</span>
+      <div class="rank-bar-wrap"><div class="rank-track"><div class="rank-fill" style="width:${r.tx}%"></div></div><span class="rank-tx">${r.tx}%</span></div>
+    </div>`).join('')}
+    ${!sorted.length ? `<div style="padding:26px 18px;display:flex;flex-direction:column;gap:6px">
+      <span style="font-size:14px;font-weight:600;color:rgba(255,255,255,.6)">Ranking sem dados no período</span>
+      <span style="font-size:13px;color:rgba(255,255,255,.35)">Escolha um período maior nos filtros do topo.</span>
+    </div>` : ''}
+  </div>`;
+
+  $('sec-ranking').innerHTML = html;
+}
+
+// ── HISTÓRICO ───────────────────────────────────────────────
+function renderHistorico() {
+  const p = App.painel; if (!p) return;
+  const regs = (p.recentes || []).slice(0, 40);
+  const prods = p.produtosPedidos || [];
+
+  const html = `<div class="box">
+    <div style="display:flex;align-items:baseline;gap:10px;flex-wrap:wrap">
+      <span class="h-card">O que os clientes procuraram</span>
+      <span style="flex:1"></span>
+      ${prods.length ? `<span class="label-mono">${prods.length} ${prods.length === 1 ? 'PEDIDO' : 'PEDIDOS'} NO PERÍODO</span>` : ''}
+    </div>
+    <span style="font-size:13px;color:rgba(255,255,255,.6);line-height:1.5">Perdas com o motivo “Produto específico”, do jeito que a loja escreveu. Serve para decidir o que produzir.</span>
+    ${produtosPedidosHtml(prods, { repetidos: true, vazio: 'Nenhum pedido de produto específico neste período. Amplie o período nos filtros do topo.' })}
+  </div>
+  <div class="hist-table">
+    <div class="hist-head"><span>DATA/HORA</span><span>VENDEDOR</span><span>LOJA</span><span>RESULTADO</span><span>MOTIVO</span></div>
+    ${regs.map(r => `<div class="hist-row">
+      <span class="quando">${fmtHistData(r.ts)}</span>
+      <span class="nome">${esc(r.vend)}</span>
+      <span class="loja">${esc(r.nomeLoja)}</span>
+      ${badgeResultado(r.resultado)}
+      <span class="motivo">${esc(r.motivo || (r.isTroca ? 'Troca / ajuste' : '—'))}${r.produtoEsp ? ' · ' + esc('“' + r.produtoEsp + '”') : ''}</span>
+    </div>`).join('')}
+    ${!regs.length ? `<div style="padding:26px 18px;display:flex;flex-direction:column;gap:6px">
+      <span style="font-size:14px;font-weight:600;color:rgba(255,255,255,.6)">Ainda não há atendimentos neste período</span>
+      <span style="font-size:13px;color:rgba(255,255,255,.35)">Registre o primeiro na fila da loja ou amplie o período.</span>
+    </div>` : ''}
+  </div>`;
+
+  $('sec-historico').innerHTML = html;
+}
+
+// ── ANÁLISE INDIVIDUAL ──────────────────────────────────────
+function renderAnaliseShell() {
+  const lojasOpts = '<option value="">Todas as lojas</option>' +
+    (App.config.lojas || []).map(l => `<option value="${attr(l.key)}">${esc(l.name)}</option>`).join('');
+
+  $('sec-analise').innerHTML = `
+    <div class="grid-filtro">
+      <div style="display:flex;flex-direction:column;gap:6px">
+        <span class="label-mono">LOJA</span>
+        <select id="an-loja" class="sel" style="width:100%" onchange="onAnaliseLojaChange()">${lojasOpts}</select>
+      </div>
+      <div style="display:flex;flex-direction:column;gap:6px">
+        <span class="label-mono">VENDEDOR</span>
+        <select id="an-vend" class="sel" style="width:100%" onchange="onAnaliseVendChange()"></select>
+      </div>
+      <div style="display:flex;flex-direction:column;gap:6px">
+        <span class="label-mono">PERÍODO</span>
+        <select id="an-periodo" class="sel" style="width:100%" onchange="onAnalisePeriodoChange()">
+          <option value="hoje">Hoje</option><option value="7">Últimos 7 dias</option><option value="30">Últimos 30 dias</option>
+        </select>
+      </div>
+    </div>
+    <div id="an-body"></div>`;
+
+  $('an-loja').value = App.lojaFiltro;
+  $('an-periodo').value = App.periodo;
+  loadAnaliseVendedores();
+}
+
+async function loadAnaliseVendedores() {
+  const lojaKey = $('an-loja').value;
+  try {
+    const r = await call('getVendedoresPorLoja', lojaKey || '');
+    const vends = r.vendedores || [];
+    if (!App.analiseVend || !vends.includes(App.analiseVend)) App.analiseVend = vends[0] || '';
+    $('an-vend').innerHTML = vends.length
+      ? vends.map(v => `<option value="${attr(v)}">${esc(v)}</option>`).join('')
+      : '<option value="">Nenhum vendedor</option>';
+    $('an-vend').value = App.analiseVend;
+    rodarAnalise();
+  } catch (e) { toast('Erro ao carregar vendedores.', true); }
+}
+function onAnaliseLojaChange() {
+  App.lojaFiltro = $('an-loja').value;
+  $('filtro-loja').value = App.lojaFiltro;
+  loadPainel();
+  App.analiseVend = '';
+  loadAnaliseVendedores();
+}
+function onAnaliseVendChange() { App.analiseVend = $('an-vend').value; rodarAnalise(); }
+function onAnalisePeriodoChange() {
+  App.periodo = $('an-periodo').value;
+  $('filtro-periodo').value = App.periodo;
+  loadPainel();
+  rodarAnalise();
+}
+
+async function rodarAnalise() {
+  const vend = App.analiseVend;
+  if (!vend) {
+    $('an-body').innerHTML = `<div class="empty-box"><span class="t">Nenhum vendedor disponível</span><span class="s">Cadastre vendedores em Configurações para essa loja.</span></div>`;
+    return;
+  }
+  const { inicio, fim } = periodoParaDatas(App.periodo);
+  try {
+    const r = await call('getAnaliseVendedor', vend, inicio, fim);
+    if (!r.ok) return toast('Erro ao buscar dados.', true);
+    renderAnaliseBody(r.dados);
+  } catch (e) { toast('Erro de conexão.', true); }
+}
+
+function renderAnaliseBody(d) {
+  const diff = d.conversao - d.mediaGeral;
+  const comparativo = d.total === 0
+    ? 'Sem atendimentos no período — nada a comparar ainda.'
+    : (diff === 0 ? `Exatamente na média da equipe (${d.mediaGeral}%).`
+      : `${Math.abs(diff)} pontos ${diff > 0 ? 'acima' : 'abaixo'} da média da equipe (${d.mediaGeral}%) em ${d.total} atendimentos.`);
+
+  const diasNomes = ['DOM', 'SEG', 'TER', 'QUA', 'QUI', 'SEX', 'SÁB'];
+  const maxDia = Math.max(1, ...d.porDia.map(p => p.total));
+  const diasHtml = d.porDia.map(p => {
+    const parts = p.data.split('/');
+    const dt = new Date(Number(parts[2]), Number(parts[1]) - 1, Number(parts[0]));
+    const isMax = p.total === maxDia && p.total > 0;
+    return `<div class="dia-col">
+      <span class="dia-n">${p.total}</span>
+      <div class="dia-bar ${isMax ? 'max' : ''}" style="height:${Math.max(3, Math.round((p.total / maxDia) * 118))}px"></div>
+      <span class="dia-label">${diasNomes[dt.getDay()]}</span>
+    </div>`;
+  }).join('');
+
+  const aMot = (d.motivos || []).slice(0, 5);
+  const maxAMot = aMot.length ? aMot[0].n : 1;
+  const aHist = (d.historico || []).slice(0, 8);
+  const aProd = d.produtosPedidos || [];
+
+  $('an-body').innerHTML = `
+    <div class="grid-metric five" style="margin-top:14px">
+      <div class="metric-tile"><span class="label-mono">ATENDIMENTOS</span><span class="num-big" style="font-size:32px">${d.total}</span></div>
+      <div class="metric-tile dark"><span class="label-mono" style="color:#E86A33">VENDAS</span><span class="num-big accent" style="font-size:32px">${d.vendas}</span></div>
+      <div class="metric-tile"><span class="label-mono" style="color:#FF4D4D">PERDAS</span><span class="num-big red" style="font-size:32px">${d.perdas}</span></div>
+      <div class="metric-tile"><span class="label-mono">TROCA/AJUSTE</span><span class="num-big" style="font-size:32px">${d.trocas || 0}</span></div>
+      <div class="metric-tile"><span class="label-mono">CONVERSÃO</span><span class="num-big" style="font-size:32px">${d.conversao}%</span></div>
+    </div>
+    <div class="grid-two">
+      <div class="box">
+        <span class="h-card">Vendedor vs. equipe</span>
+        <div style="display:flex;flex-direction:column;gap:8px">
+          <div style="display:flex;justify-content:space-between;gap:10px;font-family:'JetBrains Mono',monospace;font-size:10px;color:rgba(255,255,255,.35);letter-spacing:.12em">
+            <span style="text-transform:uppercase">${esc(d.vendedor)}</span><span style="color:#E86A33">${d.conversao}%</span>
+          </div>
+          <div class="compare-bar-track"><div class="compare-bar-fill" style="width:${d.conversao}%"></div></div>
+        </div>
+        <div style="display:flex;flex-direction:column;gap:8px">
+          <div style="display:flex;justify-content:space-between;font-family:'JetBrains Mono',monospace;font-size:10px;color:rgba(255,255,255,.35);letter-spacing:.12em">
+            <span>MÉDIA DA EQUIPE</span><span>${d.mediaGeral}%</span>
+          </div>
+          <div class="compare-bar-track"><div class="compare-bar-fill media" style="width:${d.mediaGeral}%"></div></div>
+        </div>
+        <div style="background:#000;border:1px solid rgba(255,255,255,.12);padding:14px;font-size:13px;color:rgba(255,255,255,.6);line-height:1.5">${comparativo}</div>
+      </div>
+      <div class="box">
+        <span class="h-card">Atendimentos por dia</span>
+        <div class="dias-chart">${diasHtml || '<span style="font-size:13px;color:rgba(255,255,255,.35)">Sem dados no período.</span>'}</div>
+      </div>
+    </div>
+    <div class="grid-two">
+      <div class="box">
+        <span class="h-card">Motivos de perda</span>
+        ${aMot.length ? aMot.map(m => `<div class="motivo-row">
+            <span class="motivo-label">${esc(m.motivo)}</span>
+            <div class="motivo-track"><div class="motivo-fill" style="width:${Math.round((m.n / maxAMot) * 100)}%"></div></div>
+            <span style="font-family:'JetBrains Mono',monospace;font-size:12px;min-width:22px;text-align:right">${m.n}</span>
+          </div>`).join('') : '<span style="font-size:13px;color:rgba(255,255,255,.35);line-height:1.5">Nenhuma perda no período — todo atendimento virou venda.</span>'}
+      </div>
+      <div class="box">
+        <span class="h-card">Histórico do período</span>
+        ${aHist.length ? aHist.map(h => `<div style="display:flex;align-items:center;gap:12px;padding:9px 0;border-top:1px solid rgba(255,255,255,.12)">
+            <span style="font-family:'JetBrains Mono',monospace;font-size:11px;color:rgba(255,255,255,.6);min-width:96px">${esc(h.data)} ${esc(h.hora)}</span>
+            <span style="flex:1;font-size:13px;color:rgba(255,255,255,.6);min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(descricaoAtend(h))}${h.produtoEsp ? ' · ' + esc('“' + h.produtoEsp + '”') : ''}</span>
+            ${badgeResultado(h.resultado)}
+          </div>`).join('') : '<span style="font-size:13px;color:rgba(255,255,255,.35);line-height:1.5">Sem registros para este vendedor no período.</span>'}
+      </div>
+    </div>
+    <div class="box" style="margin-top:18px">
+      <div style="display:flex;align-items:baseline;gap:10px;flex-wrap:wrap">
+        <span class="h-card">O que os clientes procuraram</span>
+        <span style="flex:1"></span>
+        ${aProd.length ? `<span class="label-mono">${aProd.length} ${aProd.length === 1 ? 'PEDIDO' : 'PEDIDOS'}</span>` : ''}
+      </div>
+      ${produtosPedidosHtml(aProd, { repetidos: true, vazio: 'Este vendedor não registrou nenhum pedido de produto específico no período.' })}
+    </div>`;
+}
+
+// ── CONFIGURAÇÕES ────────────────────────────────────────────
+async function loadConfig() {
+  $('sec-config').innerHTML = `<div class="grid-two-inner" id="config-grid"><div class="empty-box">Carregando…</div></div>`;
+  try {
+    const r = await call('getConfigVendedores');
+    if (!r.ok) return toast(r.erro || 'Erro ao carregar.', true);
+    App.configLojas = r.lojas;
+    renderConfig();
+  } catch (e) { toast('Erro de conexão.', true); }
+}
+function renderConfig() {
+  const lojas = App.configLojas || {};
+  const html = Object.entries(lojas).map(([lojaKey, loja]) => `
+    <div class="team-box">
+      <div class="team-head">
+        <span class="h-card" style="font-size:15px">${esc(curto(loja.nome))}</span>
+        <button class="btn-add" onclick="abrirModalAdd('${attr(lojaKey)}','${attr(loja.nome)}')">+ Adicionar</button>
+      </div>
+      ${loja.vendedores.length ? loja.vendedores.map(v => `<div class="team-row">
+          <span class="name">${esc(v.nome)}</span>
+          <button class="btn-remove" onclick="abrirModalRemove('${attr(lojaKey)}','${attr(v.nome)}')">Remover</button>
+        </div>`).join('') : `<div style="padding:22px 18px;display:flex;flex-direction:column;gap:6px">
+          <span style="font-size:14px;font-weight:600;color:rgba(255,255,255,.6)">Nenhum vendedor cadastrado</span>
+          <span style="font-size:13px;color:rgba(255,255,255,.35);line-height:1.5">Adicione a equipe da loja para que ela possa entrar na fila.</span>
+        </div>`}
+    </div>`).join('');
+  $('config-grid').innerHTML = html || '<div class="empty-box">Nenhuma loja configurada.</div>';
+}
+
+function abrirModalAdd(lojaKey, lojaNome) {
+  App.addLojaKey = lojaKey;
+  $('add-loja-nome').textContent = lojaNome;
+  $('add-nome').value = '';
+  onNovoNomeInput();
+  abrirModal('overlay-add');
+  setTimeout(() => $('add-nome').focus(), 100);
+}
+function onNovoNomeInput() {
+  const has = $('add-nome').value.trim().length > 0;
+  $('btn-confirmar-add').style.background = has ? '#E86A33' : '#1A1A1A';
+  $('btn-confirmar-add').style.color = has ? '#111' : 'rgba(255,255,255,.3)';
+}
+async function confirmarAdicao() {
+  const nome = $('add-nome').value.trim();
+  if (!nome) return;
+  fecharModal('overlay-add');
+  setLoading(true, 'Adicionando…');
+  try {
+    const r = await call('adicionarVendedor', App.addLojaKey, nome);
+    if (!r.ok) return toast(r.erro, true);
+    toast(nome + ' cadastrado');
+    await loadConfig();
+  } catch (e) { toast('Erro ao adicionar.', true); }
+  finally { setLoading(false); }
+}
+
+function abrirModalRemove(lojaKey, nome) {
+  App.removeLojaKey = lojaKey; App.removeNome = nome;
+  $('remove-titulo').textContent = 'Remover ' + nome + '?';
+  abrirModal('overlay-remove');
+}
+async function confirmarRemocao() {
+  fecharModal('overlay-remove');
+  setLoading(true, 'Removendo…');
+  try {
+    const r = await call('removerVendedor', App.removeLojaKey, App.removeNome);
+    if (!r.ok) return toast(r.erro, true);
+    toast(App.removeNome + ' removido.');
+    await loadConfig();
+  } catch (e) { toast('Erro ao remover.', true); }
+  finally { setLoading(false); }
+}
+
+// ── EXPORTAR PLANILHA ────────────────────────────────────────
+function abrirModalExportar() {
+  const hoje = new Date();
+  const y = hoje.getFullYear(), m = String(hoje.getMonth() + 1).padStart(2, '0'), d = String(hoje.getDate()).padStart(2, '0');
+  $('exp-inicio').value = `${y}-${m}-01`;
+  $('exp-fim').value = `${y}-${m}-${d}`;
+  $('exp-loja').value = App.lojaFiltro || '';
+  $('exp-resultado').style.display = 'none';
+  const btn = $('btn-exportar');
+  btn.disabled = false;
+  btn.textContent = 'Gerar planilha';
+  btn.style.background = '#E86A33'; btn.style.color = '#111';
+  abrirModal('overlay-export');
+}
+async function gerarExportacao() {
+  const loja = $('exp-loja').value, inicio = $('exp-inicio').value, fim = $('exp-fim').value;
+  if (!inicio || !fim) return toast('Preencha as datas.', true);
+  if (inicio > fim) return toast('Data início não pode ser maior que data fim.', true);
+
+  const btn = $('btn-exportar');
+  btn.disabled = true; btn.textContent = 'Gerando…';
+  btn.style.background = '#1A1A1A'; btn.style.color = 'rgba(255,255,255,.4)';
+  $('exp-resultado').style.display = 'none';
+
+  try {
+    const r = await call('exportarPlanilha', loja || null, inicio, fim);
+    if (!r.ok) { toast(r.erro || 'Erro ao gerar planilha.', true); return; }
+    $('exp-link').href = r.url;
+    $('exp-linhas').textContent = 'PLANILHA GERADA · ' + r.nome;
+    $('exp-resultado').style.display = 'flex';
+    toast('Planilha gerada com sucesso!');
+  } catch (e) {
+    toast('Erro de conexão.', true);
+  } finally {
+    btn.disabled = false; btn.textContent = 'Gerar planilha';
+    btn.style.background = '#E86A33'; btn.style.color = '#111';
+  }
+}
+</script>
